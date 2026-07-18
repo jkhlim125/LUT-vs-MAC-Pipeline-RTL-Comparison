@@ -1,156 +1,72 @@
-# LUT vs MAC Inference Pipeline (RTL + Latency Analysis)
+# LUT vs MAC Inference Pipeline — RTL + Cycle-Accurate Latency
 
----
+Two hardware inference pipelines in Verilog — **LUT-based** (lookup-table) and **MAC-based**
+(multiply-accumulate) — processing the same input under identical control, so the only variable is
+the datapath. Latency is measured from real signal events, not assumed pipeline depth.
 
-## 1. Overview
+## Result
 
-This project implements and compares two hardware inference pipelines in RTL:
+**LUT = 4 cycles, MAC = 5 cycles — the same +1 across all 18 runs** (`results/comparison_results.csv`,
+every row `4,5`). The extra cycle is traceable to exactly one added register stage in the MAC
+scoring datapath (`rtl/class_scoring_neuron_mac.v`). Small, but cleanly controlled and verified.
 
-- LUT-based inference (lookup-table driven)
-- MAC-based inference (multiply-accumulate style)
+![Event-based latency: latency_lut=4, latency_mac=5](results/latency_comparsion.png)
 
-Both pipelines process the same input stream under identical control conditions, enabling direct comparison of datapath structure and latency.
+The LUT output asserts `out_valid` one cycle before the MAC output; `latency_lut` settles to 4 and
+`latency_mac` to 5.
 
-The focus is not only on implementation, but on verifying timing behavior using cycle-accurate, event-based measurement.
+## How latency is measured
 
----
+Event-based, one transaction per run to guarantee correct pairing:
 
-## 2. Design Concept
+```
+start = rising edge of in_valid
+end   = out_valid_lut  → latency_lut
+        out_valid_mac  → latency_mac
+latency = end_cycle − start_cycle          # logged as run_id, latency_lut, latency_mac
+```
 
-Two pipelines operate in parallel:
+This measures the real signal timing rather than trusting the designed depth — the point of the project.
 
-Input → LUT pipeline → Output (LUT)
-      → MAC pipeline → Output (MAC)
+## Datapath
 
-Key idea:
-- Same input
-- Same control
-- Different datapath
+```
+Input → Register → Feature extraction → Scoring → Aggregation → Decision → Output
+                                          └─ MAC path adds one registered stage here (+1 cycle)
+```
 
-→ Enables direct latency comparison
+![Pipeline overview](results/pipeline_overview.png)
 
----
+| LUT path | MAC path |
+|---|---|
+| ![LUT path](results/lut_path.png) | ![MAC path](results/mac_path.png) |
 
-## 3. Pipeline Structure
+## Modules
 
-Both pipelines follow:
-
-Input → Register → Feature Extraction → Scoring → Aggregation → Decision → Output
-
-Difference:
-- MAC pipeline contains one additional register stage
-- This should introduce +1 cycle latency
-
----
-
-## 4. Module Structure
-
+```
 rtl/
-- inference_top.v            (top-level, instantiates both pipelines)
-- *_lut.v                   (LUT-based logic)
-- *_mac.v                   (MAC-based logic with pipeline stage)
-- class_aggregator.v
-- decision_logic.v
-
+  inference_top.v / inference_top_mac.v   top level, instantiates both pipelines
+  lut_feature_layer.v / _neuron.v         LUT feature extraction
+  class_scoring_layer.v / _neuron.v       LUT scoring
+  class_scoring_layer_mac.v / _neuron_mac.v   MAC scoring (the extra register stage)
+  class_aggregator.v · decision_logic.v
 tb/
-- inference_top_tb.v        (testbench with latency measurement)
-
+  inference_top_tb.v                      drives one transaction per run, logs latency
 results/
-- waveform screenshots
-- comparison_results.csv
+  comparison_results.csv                  18 runs, all 4 vs 5
+  *.png                                   waveforms
+```
 
----
+## Run
 
-## 5. Event-based Latency Measurement
-
-Latency is measured using real signal events:
-
-Start:
-- rising edge of in_valid
-
-End:
-- out_valid_lut  → LUT latency
-- out_valid_mac  → MAC latency
-
-latency = output_cycle − input_cycle
-
-Each run is a single transaction to ensure correct pairing.
-
-Results are logged as:
-
-run_id, latency_lut, latency_mac
-
----
-
-## 6. Results
-
-Measured latency:
-
-- LUT path: 4 cycles
-- MAC path: 5 cycles
-
-Key observation:
-MAC latency is consistently +1 cycle.
-
-This confirms:
-- the additional pipeline register is effective
-- datapath behavior matches design intent
-- valid signals are correctly aligned
-
----
-
-## 7. Waveform Verification
-
-### Pipeline Execution
-<img width="1069" height="317" alt="lut1" src="https://github.com/user-attachments/assets/0e24d8b8-9c6e-4b6d-80ad-35a4aa10e35d" />
-
-This waveform shows the overall pipeline behavior. Input-valid events propagate through staged valid signals, and the MAC path produces output one cycle later than the LUT path due to the additional pipeline register.
-
----
-
-### LUT Path
-<img width="956" height="272" alt="lut2" src="https://github.com/user-attachments/assets/f6d2bb55-1c70-403a-8db1-dbb1d23c3e66" />
-
-This waveform focuses on the LUT path. It shows the propagation of valid signals through the LUT-based feature extraction and scoring stages until the final LUT output becomes valid.
-
----
-
-### MAC Path
-<img width="869" height="302" alt="lut3" src="https://github.com/user-attachments/assets/3f53f764-37fb-4de5-8db8-df90559ca3a5" />
-
-This waveform focuses on the MAC path. Compared to the LUT path, the MAC pipeline includes an additional registered stage, resulting in a one-cycle delay before the final output becomes valid.
-
----
-
-### Latency Comparison
-<img width="1069" height="407" alt="lut4" src="https://github.com/user-attachments/assets/a1323f84-9d83-4b96-8e5f-4f681a35dfed" />
-
-This waveform verifies the event-based latency measurement. The LUT output becomes valid 4 cycles after the input-valid event, while the MAC output becomes valid 5 cycles later, confirming the deterministic +1 cycle delay introduced by the additional MAC pipeline stage.
-
----
-
-## 8. Key Takeaways
-
-- Pipeline depth directly determines latency
-- Latency must be measured using real events, not assumed
-- Valid signal alignment is critical in multi-stage pipelines
-- Small structural changes (1 register) produce measurable timing differences
-
-Although both designs implement similar inference functionality, the MAC-based version introduces additional latency due to sequential accumulation.
-
-In contrast, the LUT-based design relies purely on combinational mapping, allowing faster propagation through the pipeline.
-
----
-
-## 9. How to Run
-
-Compile:
-iverilog -o simv \
-tb/inference_top_tb.v \
-rtl/*.v
-
-Run:
+```bash
+iverilog -o simv tb/inference_top_tb.v rtl/*.v
 vvp simv
+gtkwave wave.vcd      # optional, to inspect signals
+```
 
-View waveform:
-gtkwave wave.vcd
+## Takeaways
+
+- Pipeline depth determines latency — and it must be measured from real events, not assumed.
+- Valid-signal alignment is critical in multi-stage pipelines.
+- A one-register structural change produces a deterministic, measurable +1 cycle.
